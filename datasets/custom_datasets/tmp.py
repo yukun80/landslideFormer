@@ -20,32 +20,15 @@ __all__ = ["InstanceCOCOCustomNewBaselineDatasetMapper"]
 
 
 def convert_coco_poly_to_mask(segmentations, height, width):
-    """
-    args:
-        segmentations: list[list[list[float]]] 多边形分割列表
-        height, width: the size of the resulting mask.
-    """
     masks = []
     for polygons in segmentations:
-        """对于每个多边形分割，函数首先使用coco_mask.frPyObjects方法将其转换为RLE
-        （Run-Length Encoding，行程长度编码）格式，
-        然后使用coco_mask.decode方法将RLE格式的分割解码为二进制掩码。"""
         rles = coco_mask.frPyObjects(polygons, height, width)
         mask = coco_mask.decode(rles)
-        """接下来，函数检查解码后的掩码的维度。
-        如果掩码的维度少于3（即，掩码是一个二维数组），函数将在最后一个维度上添加一个新的维度。
-        这是因为我们需要一个三维的掩码，其中第一维表示不同的分割，第二和第三维表示图像的高度和宽度。"""
         if len(mask.shape) < 3:
             mask = mask[..., None]
-        """然后，函数将掩码转换为torch.Tensor类型，并将其数据类型设置为torch.uint8。
-        这是因为我们需要一个由0和1组成的二进制掩码，而torch.uint8类型可以有效地存储这样的数据。"""
         mask = torch.as_tensor(mask, dtype=torch.uint8)
-        """函数使用any方法将掩码在第三个维度上进行逻辑或运算，得到一个二维的掩码。
-        这是因为在COCO数据集中，一个物体可能有多个分割，我们需要将这些分割合并为一个掩码。"""
         mask = mask.any(dim=2)
         masks.append(mask)
-    """如果masks列表不为空，函数使用torch.stack方法将列表中的所有掩码堆叠在一起，得到一个三维的Tensor；
-    如果masks列表为空，函数使用torch.zeros方法创建一个形状为(0, height, width)的零Tensor。"""
     if masks:
         masks = torch.stack(masks, dim=0)
     else:
@@ -55,8 +38,8 @@ def convert_coco_poly_to_mask(segmentations, height, width):
 
 def build_transform_gen(cfg, is_train):
     """
-    该函数从配置对象 cfg 中创建一个默认的 Augmentation 列表。
-    这个函数主要用于图像的预处理，包括缩放和翻转等操作。
+    Create a list of default :class:`Augmentation` from config.
+    Now it includes resizing and flipping.
     Returns:
         list[Augmentation]
     """
@@ -133,14 +116,12 @@ class InstanceCOCOCustomNewBaselineDatasetMapper:
         self.things = []
         for k, v in self.meta.thing_dataset_id_to_contiguous_id.items():
             self.things.append(v)
-        # 类别
         self.class_names = self.meta.thing_classes
         self.text_tokenizer = Tokenize(SimpleTokenizer(), max_seq_len=max_seq_len)
         self.task_tokenizer = Tokenize(SimpleTokenizer(), max_seq_len=task_seq_len)
 
     @classmethod
     def from_config(cls, cfg, is_train=True):
-        """根据配置文件创建一个实例。构建图像增广操作，并获取数据集元数据。"""
         # Build augmentation
         tfm_gens = build_transform_gen(cfg, is_train)
         dataset_names = cfg.DATASETS.TRAIN
@@ -157,9 +138,8 @@ class InstanceCOCOCustomNewBaselineDatasetMapper:
         }
         return ret
 
-    # 实例分割任务的描述文本生成函数
     def _get_texts(self, classes, num_class_obj):
-        """根据类ID生成描述文本。返回包含描述文本的列表。"""
+
         classes = list(np.array(classes))
         texts = ["an instance photo"] * self.num_queries
 
@@ -198,7 +178,7 @@ class InstanceCOCOCustomNewBaselineDatasetMapper:
         # the crop transformation has default padding value 0 for segmentation
         padding_mask = transforms.apply_segmentation(padding_mask)
         padding_mask = ~padding_mask.astype(bool)
-        """转换图像格式：获取图像的形状（高度和宽度）。"""
+
         image_shape = image.shape[:2]  # h, w
 
         # Pytorch's dataloader is efficient on torch.Tensor due to shared-memory,
@@ -207,9 +187,7 @@ class InstanceCOCOCustomNewBaselineDatasetMapper:
         dataset_dict["image"] = torch.as_tensor(np.ascontiguousarray(image.transpose(2, 0, 1)))
         dataset_dict["padding_mask"] = torch.as_tensor(np.ascontiguousarray(padding_mask))
 
-        """如果不是训练模式，移除注释并返回处理后的数据集字典。"""
         if not self.is_train:
-            # 遍历注释，移除关键点信息
             # USER: Modify this if you want to keep them for some reason.
             dataset_dict.pop("annotations", None)
             return dataset_dict
@@ -220,15 +198,14 @@ class InstanceCOCOCustomNewBaselineDatasetMapper:
                 anno.pop("keypoints", None)
 
             # USER: Implement additional transformations if you have other types of data
-            # 对每个注释应用变换，并过滤掉iscrowd属性为1的注释。
             annos = [
                 utils.transform_instance_annotations(obj, transforms, image_shape)
                 for obj in dataset_dict.pop("annotations")
                 if obj.get("iscrowd", 0) == 0
             ]
-            # 将注释转换为实例对象。
+
             instances = utils.annotations_to_instances(annos, image_shape)
-            # 从实例掩码中获取边界框。
+
             instances.gt_boxes = instances.gt_masks.get_bounding_boxes()
             # Need to filter empty instances first (due to augmentation)
             instances = utils.filter_empty_instances(instances)
@@ -237,7 +214,7 @@ class InstanceCOCOCustomNewBaselineDatasetMapper:
             # image_size_xyxy = torch.as_tensor([w, h, w, h], dtype=torch.float)
             if hasattr(instances, "gt_masks"):
                 gt_masks = instances.gt_masks
-                gt_masks = convert_coco_poly_to_mask(gt_masks.polygons, h, w)  # 将COCO格式的多边形转换为掩码。
+                gt_masks = convert_coco_poly_to_mask(gt_masks.polygons, h, w)
                 instances.gt_masks = gt_masks
 
             num_class_obj = {}
